@@ -73,7 +73,7 @@ def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr
         criterion = nn.BCELoss()
         optimizer = optim.Adam(model.parameters(), lr=lr)
         
-        history = {'train_loss': [], 'val_loss': [], 'val_acc': []}
+        history = {'train_loss': [], 'val_loss': [], 'val_acc': [], 'best_acc': 0.0}
         
         # --- 4. 训练循环 ---
         for epoch in range(epochs):
@@ -107,10 +107,16 @@ def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr
             
             print(f"  Epoch {epoch+1}: Train Loss={avg_loss:.4f}, Val Loss={val_result['loss']:.4f}, Val Acc={val_result['acc']:.2f}%")
             
-        # 保存该 Fold 的最佳/最终模型
-        save_path = os.path.join(output_dir, f'model_fold_{fold+1}.pth')
+            # 记录最佳模型
+            if val_result['acc'] > history['best_acc']:
+                history['best_acc'] = val_result['acc']
+                best_save_path = os.path.join(output_dir, f'model_fold_{fold+1}_best.pth')
+                torch.save(model.state_dict(), best_save_path)
+                print(f"  [New Best] Fold {fold+1} Best Model (Acc: {val_result['acc']:.2f}%) saved to {best_save_path}")
+
+        # 保存该 Fold 的最终模型
+        save_path = os.path.join(output_dir, f'model_fold_{fold+1}_last.pth')
         torch.save(model.state_dict(), save_path)
-        print(f"  Fold {fold+1} Model saved to {save_path}")
         
         all_folds_history.append(history)
         
