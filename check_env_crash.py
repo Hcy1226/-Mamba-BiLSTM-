@@ -34,7 +34,14 @@ try:
 except Exception as e:
     print(f"   Failed: {e}")
 
-print("6. Testing AutoModel (ChemBERTa)...")
+print("6. Testing AutoTokenizer (ChemBERTa)...")
+try:
+    tokenizer = AutoTokenizer.from_pretrained('seyonec/ChemBERTa-zinc-base-v1')
+    print("   Success. Tokenizer loaded.")
+except Exception as e:
+    print(f"   Failed loading Tokenizer: {e}")
+
+print("7. Testing AutoModel (ChemBERTa)...")
 try:
     model = AutoModel.from_pretrained('seyonec/ChemBERTa-zinc-base-v1')
     print("   Success. ChemBERTa loaded.")
