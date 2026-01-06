@@ -4,5 +4,4 @@ torch-geometric>=2.3.0
 scikit-learn
 tqdm
 matplotlib
-numpy
-numpy
+numpy<2.0.0
