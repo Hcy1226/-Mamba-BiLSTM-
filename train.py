@@ -107,6 +107,13 @@ def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr
             
             print(f"  Epoch {epoch+1}: Train Loss={avg_loss:.4f}, Val Loss={val_result['loss']:.4f}, Val Acc={val_result['acc']:.2f}%")
             
+            # --- 写入 CSV 日志 ---
+            log_path = os.path.join(output_dir, 'training_log.csv')
+            with open(log_path, 'a') as f:
+                if f.tell() == 0:
+                    f.write("Fold,Epoch,Train_Loss,Val_Loss,Val_Acc\n")
+                f.write(f"{fold+1},{epoch+1},{avg_loss:.5f},{val_result['loss']:.5f},{val_result['acc']:.4f}\n")
+            
             # 记录最佳模型
             if val_result['acc'] > history['best_acc']:
                 history['best_acc'] = val_result['acc']
