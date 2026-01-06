@@ -91,38 +91,69 @@ class ProteinEncoder(nn.Module):
 
 # --- Layer 2: 混合特征提取层 (Mamba-BiLSTM) ---
 
-class TempMambaBlock(nn.Module):
+# --- Layer 2: 混合特征提取层 (Mamba-BiLSTM) ---
+
+# 尝试导入 Mamba，如果失败则提供提示
+try:
+    from mamba_ssm import Mamba
+    HAS_MAMBA = True
+except ImportError:
+    HAS_MAMBA = False
+    print("Warning: mamba_ssm not found. Please install it for Mamba models.")
+
+class MambaBlock(nn.Module):
     """
-    临时替代 Mamba 的模块 (使用 Transformer Encoder).
-    如有 mamba_ssm 库，可替换为真实的 MambaBlock.
+    Real Mamba Block with Residual Connection and RMSNorm/LayerNorm.
+    Structure: Input -> Norm -> Mamba -> Residual -> Output
     """
-    def __init__(self, d_model, nhead=4, num_layers=2):
-        super(TempMambaBlock, self).__init__()
-        self.transformer_encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True, norm_first=True),
-            num_layers=num_layers
+    def __init__(self, dim, d_state=16, d_conv=4, expand=2):
+        super(MambaBlock, self).__init__()
+        if not HAS_MAMBA:
+             raise ImportError("mamba_ssm is required for this model. Run `pip install mamba-ssm`.")
+        
+        self.norm = nn.LayerNorm(dim)
+        self.mamba = Mamba(
+            d_model=dim, 
+            d_state=d_state, 
+            d_conv=d_conv, 
+            expand=expand,
+            use_fast_path=True # 使用 CUDA 优化路径
         )
     
     def forward(self, x):
-        return self.transformer_encoder(x)
+        # x: (Batch, Seq, Dim)
+        # Residual Connection: x + Mamba(Norm(x))
+        return x + self.mamba(self.norm(x))
 
 class MambaBiLSTM(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
+    def __init__(self, input_dim, hidden_dim, num_mamba_layers=3):
         super(MambaBiLSTM, self).__init__()
-        # Mamba Block (Global)
-        self.mamba = TempMambaBlock(input_dim)
-        # BiLSTM Layer (Local)
+        
+        # 1. Multi-Layer Mamba Stack (Residual included in blocks)
+        self.mamba_layers = nn.ModuleList([
+            MambaBlock(dim=input_dim) for _ in range(num_mamba_layers)
+        ])
+        
+        # 2. BiLSTM Layer (Local Feature Extraction)
+        # Mamba 擅长捕捉长距离依赖，BiLSTM 增强局部上下文
         self.bilstm = nn.LSTM(input_dim, hidden_dim // 2, bidirectional=True, batch_first=True)
-        self.norm = nn.LayerNorm(hidden_dim)
+        self.norm_final = nn.LayerNorm(hidden_dim)
 
     def forward(self, x):
         # x: (Batch, Seq_Len, Input_Dim)
-        x_mamba = self.mamba(x)
+        
+        # Pass through Mamba Layers
+        x_mamba = x
+        for layer in self.mamba_layers:
+            x_mamba = layer(x_mamba)
+            
+        # Pass through BiLSTM
         x_lstm, _ = self.bilstm(x_mamba)
-        # Residual connection or direct sequencing? 
-        # Arch says: Mamba -> BiLSTM. 
-        # We can add a residual connection if dimensions match.
-        return self.norm(x_lstm + x_mamba) # 简单的残差连接，假设 dims 匹配
+        
+        # Final Residual Fusion (Mamba + BiLSTM)
+        # 此时 x_mamba 是多层 Mamba 的输出，包含了全局长程信息
+        # x_lstm 是 BiLSTM 的输出，包含了双向局部信息
+        return self.norm_final(x_lstm + x_mamba)
 
 # --- Layer 3: 双向交互注意力层 (Bi-directional Attention) ---
 
@@ -190,8 +221,8 @@ class MambaBiLSTMModel(nn.Module):
         self.prot_proj = nn.Linear(prot_dim, hidden_dim)
         
         # Layer 2: Mamba + BiLSTM
-        self.drug_process = MambaBiLSTM(hidden_dim, hidden_dim)
-        self.prot_process = MambaBiLSTM(hidden_dim, hidden_dim)
+        self.drug_process = MambaBiLSTM(hidden_dim, hidden_dim, num_mamba_layers=3)
+        self.prot_process = MambaBiLSTM(hidden_dim, hidden_dim, num_mamba_layers=3)
         
         # Layer 3: Bidirectional Attention
         self.bi_attention = BidirectionalAttention(hidden_dim)
