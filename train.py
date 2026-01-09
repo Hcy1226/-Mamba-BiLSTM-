@@ -70,7 +70,15 @@ def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr
         model = get_model(model_name, drug_dim=256, prot_dim=512, hidden_dim=hidden_dim, fine_tune=fine_tune).to(device)
         
         # --- 3. 训练配置 ---
-        criterion = nn.BCELoss()
+        # 计算 pos_weight (负样本数 / 正样本数) 以处理类别不平衡
+        all_labels = dataset.labels
+        num_pos = sum(all_labels)
+        num_neg = len(all_labels) - num_pos
+        pos_weight_val = num_neg / num_pos if num_pos > 0 else 1.0
+        pos_weight = torch.tensor([pos_weight_val]).to(device)
+        print(f"Using BCEWithLogitsLoss with pos_weight={pos_weight_val:.2f} (Neg: {num_neg}, Pos: {num_pos})")
+        
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         optimizer = optim.Adam(model.parameters(), lr=lr)
         
         history = {'train_loss': [], 'val_loss': [], 'val_acc': [], 'best_acc': 0.0}
@@ -153,7 +161,9 @@ def validate(model, loader, criterion, device):
             loss = criterion(outputs, labels)
             val_loss += loss.item()
             
-            predicted = (outputs > 0.5).float()
+            # 由于使用了 BCEWithLogitsLoss，输出是 logits，需要先 sigmoid 再判断
+            probs = torch.sigmoid(outputs)
+            predicted = (probs > 0.5).float()
             correct += (predicted == labels).sum().item()
             total += labels.size(0)
             

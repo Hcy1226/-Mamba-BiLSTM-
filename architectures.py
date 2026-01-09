@@ -262,8 +262,7 @@ class MambaBiLSTMModel(nn.Module):
             nn.Linear(hidden_dim * 2, 128),
             nn.Dropout(0.2),
             nn.ReLU(),
-            nn.Linear(128, 1),
-            nn.Sigmoid()
+            nn.Linear(128, 1)
         )
 
     def forward(self, drug_input, prot_input):
