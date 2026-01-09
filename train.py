@@ -14,7 +14,7 @@ from sklearn.model_selection import KFold
 from architectures import get_model
 from dataset import DTIDataset, collate_dti
 
-def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr=1e-4, folds=5, model_name='mamba_bilstm', fine_tune=False, debug=False):
+def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr=1e-4, folds=5, model_name='mamba_bilstm', fine_tune=False, hidden_dim=256, debug=False):
     """
     训练主函数 (5-Fold Cross Validation)
     """
@@ -66,8 +66,8 @@ def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr
         val_loader = DataLoader(dataset, batch_size=batch_size, sampler=val_subsampler, collate_fn=collate_dti)
         
         # --- 2. 模型初始化 (每个Fold重置模型) ---
-        print(f"Initializing {model_name} (Fine-tune: {fine_tune})...")
-        model = get_model(model_name, drug_dim=256, prot_dim=512, hidden_dim=256, fine_tune=fine_tune).to(device)
+        print(f"Initializing {model_name} (Fine-tune: {fine_tune}, Hidden: {hidden_dim})...")
+        model = get_model(model_name, drug_dim=256, prot_dim=512, hidden_dim=hidden_dim, fine_tune=fine_tune).to(device)
         
         # --- 3. 训练配置 ---
         criterion = nn.BCELoss()
