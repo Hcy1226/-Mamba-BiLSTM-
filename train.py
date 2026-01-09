@@ -3,20 +3,20 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from transformers import AutoTokenizer
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 import os
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.model_selection import KFold
 
-
 # 导入模块
 from architectures import get_model
 from dataset import DTIDataset, collate_dti
 
-def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr=1e-4, folds=5, model_name='mamba_bilstm', fine_tune=False, hidden_dim=256, debug=False):
+def train_model(data_path, output_dir='checkpoints', batch_size=64, epochs=100, lr=1e-4, folds=5, model_name='mamba_bilstm', fine_tune=False, hidden_dim=512, debug=False):
     """
-    训练主函数 (5-Fold Cross Validation)
+    训练主函数 (Stable Version)
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -39,9 +39,9 @@ def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr
     if debug:
         print(f"!!! DEBUG MODE: Using small subset of data ({min(1000, len(dataset))} samples) !!!")
         dataset.slice_subset(1000)
-        batch_size = 8 # Slightly larger batch for 1000 samples
-        epochs = 2 # Keep epochs small for quick test
-        folds = 5  # Use full 5 folds to test the loop logic
+        batch_size = 8
+        epochs = 2 
+        folds = 5
 
     if len(dataset) == 0:
         print("Dataset is empty. Exiting.")
@@ -65,21 +65,19 @@ def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr
         train_loader = DataLoader(dataset, batch_size=batch_size, sampler=train_subsampler, collate_fn=collate_dti)
         val_loader = DataLoader(dataset, batch_size=batch_size, sampler=val_subsampler, collate_fn=collate_dti)
         
-        # --- 2. 模型初始化 (每个Fold重置模型) ---
-        print(f"Initializing {model_name} (Fine-tune: {fine_tune}, Hidden: {hidden_dim})...")
+        # --- 2. 模型初始化 ---
+        print(f"Initializing {model_name} (Hidden: {hidden_dim})...")
         model = get_model(model_name, drug_dim=256, prot_dim=512, hidden_dim=hidden_dim, fine_tune=fine_tune).to(device)
         
-        # --- 3. 训练配置 ---
-        # 计算 pos_weight (负样本数 / 正样本数) 以处理类别不平衡
-        all_labels = dataset.labels
-        num_pos = sum(all_labels)
-        num_neg = len(all_labels) - num_pos
-        pos_weight_val = num_neg / num_pos if num_pos > 0 else 1.0
-        pos_weight = torch.tensor([pos_weight_val]).to(device)
-        print(f"Using BCEWithLogitsLoss with pos_weight={pos_weight_val:.2f} (Neg: {num_neg}, Pos: {num_pos})")
+        # --- 3. 训练配置 (Stable Configuration) ---
+        # 移除 pos_weight，回归标准 BCEWithLogitsLoss 防止过度摆动
+        criterion = nn.BCEWithLogitsLoss()
         
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        optimizer = optim.Adam(model.parameters(), lr=lr)
+        # 初始 LR 1e-4，配合 Scheduler 下降
+        optimizer = optim.Adam(model.parameters(), lr=lr) 
+        
+        # 调度器: 当 val_acc 停止上升时，LR 减半
+        scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
         
         history = {'train_loss': [], 'val_loss': [], 'val_acc': [], 'best_acc': 0.0}
         
@@ -96,7 +94,7 @@ def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr
                 labels = batch['labels'].to(device).unsqueeze(1)
                 
                 optimizer.zero_grad()
-                outputs, _ = model(d_input, p_input)
+                outputs = model(d_input, p_input) # outputs are logits
                 
                 loss = criterion(outputs, labels)
                 loss.backward()
@@ -113,6 +111,9 @@ def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr
             history['val_loss'].append(val_result['loss'])
             history['val_acc'].append(val_result['acc'])
             
+            # Step Scheduler
+            scheduler.step(val_result['acc'])
+            
             print(f"  Epoch {epoch+1}: Train Loss={avg_loss:.4f}, Val Loss={val_result['loss']:.4f}, Val Acc={val_result['acc']:.2f}%")
             
             # --- 写入 CSV 日志 ---
@@ -128,6 +129,9 @@ def train_model(data_path, output_dir='checkpoints', batch_size=8, epochs=10, lr
                 best_save_path = os.path.join(output_dir, f'model_fold_{fold+1}_best.pth')
                 torch.save(model.state_dict(), best_save_path)
                 print(f"  [New Best] Fold {fold+1} Best Model (Acc: {val_result['acc']:.2f}%) saved to {best_save_path}")
+            
+            # Early Stopping Check (Loose)
+            # if no improvement for 15 epochs, maybe stop? For now let it run.
 
         # 保存该 Fold 的最终模型
         save_path = os.path.join(output_dir, f'model_fold_{fold+1}_last.pth')
@@ -157,11 +161,11 @@ def validate(model, loader, criterion, device):
             p_input = (batch['prot_input'][0].to(device), batch['prot_input'][1].to(device), batch['prot_input'][2].to(device))
             labels = batch['labels'].to(device).unsqueeze(1)
             
-            outputs, _ = model(d_input, p_input)
+            outputs = model(d_input, p_input)
             loss = criterion(outputs, labels)
             val_loss += loss.item()
             
-            # 由于使用了 BCEWithLogitsLoss，输出是 logits，需要先 sigmoid 再判断
+            # Logits -> Sigmoid -> Threshold
             probs = torch.sigmoid(outputs)
             predicted = (probs > 0.5).float()
             correct += (predicted == labels).sum().item()

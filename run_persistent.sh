@@ -12,7 +12,10 @@ echo "=================================================="
 # > training_nohup.log : 将输出保存到文件
 # 2>&1                 : 将错误信息也保存到同一个文件
 # &                    : 放入后台运行，即使 SSH 断开也不停止
-nohup python run.py train --epochs 100 --batch_size 64 --lr 0.0005 --hidden_dim 512 > training_nohup.log 2>&1 &
+# Clean up patches
+rm -f patch_manual.py patch_super_optimize.py
+
+nohup python run.py train --epochs 100 --batch_size 64 --lr 0.0001 --hidden_dim 512 > training_nohup.log 2>&1 &
 
 # 4. 获取进程 ID
 PID=$!
