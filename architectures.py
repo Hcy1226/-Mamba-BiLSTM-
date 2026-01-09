@@ -4,12 +4,34 @@ import torch.nn.functional as F
 from transformers import AutoModel
 from torch_geometric.nn import GATConv, GCNConv, global_mean_pool
 
+class AttentionPooling(nn.Module):
+    def __init__(self, in_dim):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(in_dim, in_dim // 2),
+            nn.Tanh(),
+            nn.Linear(in_dim // 2, 1)
+        )
+    
+    def forward(self, x, mask=None):
+        # x: (B, L, D)
+        # mask: (B, L)
+        w = self.attention(x).squeeze(-1) # (B, L)
+        
+        if mask is not None:
+            # mask is 1 for valid, 0 for pad. masked_fill expects mask to be True for "fill"
+            # so we fill where mask == 0
+            w = w.masked_fill(mask == 0, -1e9)
+        
+        weights = F.softmax(w, dim=1).unsqueeze(-1) # (B, L, 1)
+        return (x * weights).sum(dim=1)
+
 # --- Layer 1: 输入与表征层 ---
 
 class DrugEncoder(nn.Module):
     def __init__(self, smiles_model_name='seyonec/ChemBERTa-zinc-base-v1', 
                  graph_in_channels=74, graph_hidden_channels=128, 
-                 out_channels=256):
+                 out_channels=256, fine_tune=False):
         """
         药物编码器: 结合SMILES序列特征与分子图结构特征
         """
@@ -17,9 +39,11 @@ class DrugEncoder(nn.Module):
         
         # 1. 序列支路 (SMILES)
         self.bert = AutoModel.from_pretrained(smiles_model_name)
-        # Freeze params
-        for param in self.bert.parameters():
-            param.requires_grad = False
+        
+        if not fine_tune:
+            for param in self.bert.parameters():
+                param.requires_grad = False
+        
         self.bert_hidden_size = self.bert.config.hidden_size
         
         # 2. 结构支路 (Graph)
@@ -51,7 +75,7 @@ class DrugEncoder(nn.Module):
 class ProteinEncoder(nn.Module):
     def __init__(self, esm_model_name='facebook/esm2_t6_8M_UR50D',
                  graph_in_channels=1280, graph_hidden_channels=256,
-                 out_channels=512):
+                 out_channels=512, fine_tune=False):
         """
         蛋白质编码器: 结合氨基酸序列特征与残基接触图特征
         """
@@ -59,9 +83,11 @@ class ProteinEncoder(nn.Module):
         
         # 1. 序列支路 (ESM-2)
         self.esm = AutoModel.from_pretrained(esm_model_name)
-        # Freeze params
-        for param in self.esm.parameters():
-            param.requires_grad = False
+        
+        if not fine_tune:
+            for param in self.esm.parameters():
+                param.requires_grad = False
+        
         self.esm_hidden_size = self.esm.config.hidden_size
         
         # 2. 结构支路 (Contact Map / Structure using GCN)
@@ -209,12 +235,12 @@ class BidirectionalAttention(nn.Module):
 # --- Layer 4 + Total Model ---
 
 class MambaBiLSTMModel(nn.Module):
-    def __init__(self, drug_dim=256, prot_dim=512, hidden_dim=256):
+    def __init__(self, drug_dim=256, prot_dim=512, hidden_dim=256, fine_tune=False):
         super(MambaBiLSTMModel, self).__init__()
         
         # Layer 1: Encoding
-        self.drug_encoder = DrugEncoder(out_channels=drug_dim)
-        self.prot_encoder = ProteinEncoder(out_channels=prot_dim)
+        self.drug_encoder = DrugEncoder(out_channels=drug_dim, fine_tune=fine_tune)
+        self.prot_encoder = ProteinEncoder(out_channels=prot_dim, fine_tune=fine_tune)
         
         # Projection
         self.drug_proj = nn.Linear(drug_dim, hidden_dim)
@@ -227,7 +253,11 @@ class MambaBiLSTMModel(nn.Module):
         # Layer 3: Bidirectional Attention
         self.bi_attention = BidirectionalAttention(hidden_dim)
         
-        # Layer 4: Prediction
+        # Layer 4: Global Pooling (Attention Pooling)
+        self.drug_pool = AttentionPooling(hidden_dim)
+        self.prot_pool = AttentionPooling(hidden_dim)
+        
+        # Layer 5: Prediction
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim * 2, 128),
             nn.Dropout(0.2),
@@ -251,8 +281,9 @@ class MambaBiLSTMModel(nn.Module):
         
         d_context, p_context, attn_maps = self.bi_attention(d_feat, p_feat, d_mask, p_mask)
         
-        d_global = (d_context * d_mask.unsqueeze(-1)).sum(dim=1) / d_mask.sum(dim=1, keepdim=True).clamp(min=1e-9)
-        p_global = (p_context * p_mask.unsqueeze(-1)).sum(dim=1) / p_mask.sum(dim=1, keepdim=True).clamp(min=1e-9)
+        # Weighted Attention Pooling
+        d_global = self.drug_pool(d_context, d_mask)
+        p_global = self.prot_pool(p_context, p_mask)
         
         combined = torch.cat([d_global, p_global], dim=-1)
         score = self.classifier(combined)

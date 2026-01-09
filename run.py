@@ -22,6 +22,7 @@ def main():
     train_parser.add_argument('--model_name', type=str, default='mamba_bilstm', 
                               choices=['mamba_bilstm', 'deepdta', 'transformer', 'graphdta', 'mcanet'],
                               help='Model architecture to use')
+    train_parser.add_argument('--fine_tune', action='store_true', help='Fine-tune pre-trained encoders (ChemBERTa/ESM-2)')
     train_parser.add_argument('--debug', action='store_true', help='Run in debug mode (fast, small data)')
     
     # Test Parser
@@ -36,7 +37,7 @@ def main():
     
     if args.mode == 'train':
         print("Starting Training...")
-        train_model(args.data, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, folds=args.folds, model_name=args.model_name, debug=args.debug)
+        train_model(args.data, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, folds=args.folds, model_name=args.model_name, fine_tune=args.fine_tune, debug=args.debug)
         
     elif args.mode == 'test':
         print("Starting Testing...")
