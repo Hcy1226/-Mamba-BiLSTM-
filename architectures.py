@@ -264,10 +264,180 @@ class MambaBiLSTMModel(nn.Module):
         
         return self.classifier(combined)
 
-# --- Baseline Models (Stubs for compatibility) ---
+# --- Baseline Models ---
+
+class DeepDTA(nn.Module):
+    """
+    DeepDTA: Deep Drug-Target Binding Affinity Prediction
+    Uses CNNs for both Drug (SMILES) and Protein (Sequence)
+    """
+    def __init__(self, drug_vocab_size=600, prot_vocab_size=26, 
+                 embedding_dim=128, hidden_dim=256):
+        super(DeepDTA, self).__init__()
+        
+        # Drug Branch (CNN)
+        self.drug_embed = nn.Embedding(drug_vocab_size, embedding_dim)
+        self.drug_cnn = nn.Sequential(
+            nn.Conv1d(embedding_dim, 32, kernel_size=4),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, kernel_size=6),
+            nn.ReLU(),
+            nn.Conv1d(64, 96, kernel_size=8),
+            nn.ReLU(),
+            nn.AdaptiveMaxPool1d(1)
+        )
+        
+        # Protein Branch (CNN)
+        self.prot_embed = nn.Embedding(prot_vocab_size, embedding_dim)
+        self.prot_cnn = nn.Sequential(
+            nn.Conv1d(embedding_dim, 32, kernel_size=4),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, kernel_size=8),
+            nn.ReLU(),
+            nn.Conv1d(64, 96, kernel_size=12),
+            nn.ReLU(),
+            nn.AdaptiveMaxPool1d(1)
+        )
+        
+        # FC Layers
+        self.fc = nn.Sequential(
+            nn.Linear(96 * 2, 1024),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 1024),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 1)
+        )
+        
+    def forward(self, drug_input, prot_input):
+        # drug_input -> (ids, mask, graph) -> we only use ids
+        d_ids = drug_input[0] 
+        # prot_input -> (ids, mask, edge) -> we only use ids
+        p_ids = prot_input[0]
+        
+        # Embed: (B, L) -> (B, L, E) -> (B, E, L) for Conv1d
+        d_x = self.drug_embed(d_ids).permute(0, 2, 1)
+        p_x = self.prot_embed(p_ids).permute(0, 2, 1)
+        
+        d_feat = self.drug_cnn(d_x).squeeze(-1) # (B, 96)
+        p_feat = self.prot_cnn(p_x).squeeze(-1) # (B, 96)
+        
+        combined = torch.cat([d_feat, p_feat], dim=1)
+        return self.fc(combined)
+
+
+class TransformerCPI(nn.Module):
+    """
+    TransformerCPI: Transformer-based Chem-Prot Interaction
+    Uses simplified Transformer Encoders for both inputs
+    """
+    def __init__(self, drug_vocab_size=600, prot_vocab_size=26, 
+                 d_model=128, nhead=4, num_layers=2):
+        super(TransformerCPI, self).__init__()
+        
+        self.drug_embed = nn.Embedding(drug_vocab_size, d_model)
+        self.prot_embed = nn.Embedding(prot_vocab_size, d_model)
+        
+        self.drug_encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=d_model*2, batch_first=True),
+            num_layers
+        )
+        
+        self.prot_encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=d_model*2, batch_first=True),
+            num_layers
+        )
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(d_model * 2, 128),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(128, 1)
+        )
+        
+    def forward(self, drug_input, prot_input):
+        d_ids, d_mask = drug_input[0], drug_input[1]
+        p_ids, p_mask = prot_input[0], prot_input[1]
+        
+        d_x = self.drug_embed(d_ids) # (B, L, D)
+        p_x = self.prot_embed(p_ids)
+        
+        # Pass masks (invert logic for Transformer usually, but PyTorch handle src_key_padding_mask as True=ignore)
+        # Our mask is 1=valid, 0=pad. So we need ~mask.bool()
+        d_padding_mask = (d_mask == 0)
+        p_padding_mask = (p_mask == 0)
+        
+        d_out = self.drug_encoder(d_x, src_key_padding_mask=d_padding_mask)
+        p_out = self.prot_encoder(p_x, src_key_padding_mask=p_padding_mask)
+        
+        # Global Mean Pooling (ignoring pads) -> simplified to simple mean for baseline
+        d_vec = d_out.mean(dim=1)
+        p_vec = p_out.mean(dim=1)
+        
+        combined = torch.cat([d_vec, p_vec], dim=1)
+        return self.classifier(combined)
+
+
+class MCANet(nn.Module):
+    """
+    MCANet: Multi-source Co-Attention Network (Simplified/Representative)
+    Uses Co-Attention between Drug and Protein features
+    """
+    def __init__(self, drug_vocab_size=600, prot_vocab_size=26, hidden_dim=128):
+        super(MCANet, self).__init__()
+        
+        self.drug_embed = nn.Embedding(drug_vocab_size, hidden_dim)
+        self.prot_embed = nn.Embedding(prot_vocab_size, hidden_dim)
+        
+        # Co-Attention Weight Matrices
+        self.W_d = nn.Linear(hidden_dim, hidden_dim)
+        self.W_p = nn.Linear(hidden_dim, hidden_dim)
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim * 2, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+        
+    def forward(self, drug_input, prot_input):
+        d_ids = drug_input[0]
+        p_ids = prot_input[0]
+        
+        d_feat = self.drug_embed(d_ids) # (B, Ld, H)
+        p_feat = self.prot_embed(p_ids) # (B, Lp, H)
+        
+        # Valid Co-Attention (Baseline impl)
+        # Affinity Matrix
+        aff = torch.bmm(d_feat, p_feat.transpose(1, 2)) # (B, Ld, Lp)
+        
+        # Attention maps
+        att_d = F.softmax(aff.max(dim=2)[0], dim=1).unsqueeze(2) # (B, Ld, 1)
+        att_p = F.softmax(aff.max(dim=1)[0], dim=1).unsqueeze(2) # (B, Lp, 1)
+        
+        # Weighted Sum
+        d_vec = (d_feat * att_d).sum(dim=1) # (B, H)
+        p_vec = (p_feat * att_p).sum(dim=1) # (B, H)
+        
+        combined = torch.cat([d_vec, p_vec], dim=1)
+        return self.classifier(combined)
+
+
+# --- Factory Function ---
 def get_model(model_name, **kwargs):
-    # Only optimizing MambaBiLSTM for now
-    if model_name == 'mamba_bilstm':
-        return MambaBiLSTMModel(**kwargs)
+    model_name = model_name.lower().replace('-', '').replace('_', '')
+    
+    if model_name == 'mambabilstm':
+        return MambaBiLSTMModel(fine_tune=kwargs.get('fine_tune', False), 
+                                hidden_dim=kwargs.get('hidden_dim', 256))
+    elif 'deep' in model_name: # DeepDTA, DeepConv-DTI
+        return DeepDTA()
+    elif 'transformer' in model_name: # TransformerCPI
+        return TransformerCPI()
+    elif 'mcanet' in model_name: # MCANet
+        return MCANet()
     else:
-        raise ValueError(f"Model {model_name} not fully implemented in optimization phase")
+        raise ValueError(f"Unknown model name: {model_name}")

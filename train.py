@@ -9,22 +9,29 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.model_selection import KFold
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, matthews_corrcoef, roc_auc_score, confusion_matrix
 
 # 导入模块
 from architectures import get_model
 from dataset import DTIDataset, collate_dti
 
-def train_model(data_path, output_dir='checkpoints', batch_size=64, epochs=100, lr=1e-4, folds=5, model_name='mamba_bilstm', fine_tune=False, hidden_dim=512, debug=False):
+def train_model(data_path, data_name='Davis', batch_size=64, epochs=100, lr=1e-4, folds=5, model_name='mamba_bilstm', fine_tune=False, hidden_dim=512, debug=False):
     """
-    训练主函数 (Stable Version)
+    训练主函数 (Enhanced for Comparative Experiments)
+    Structure: {data_name}/{model_name}/train_result/
     """
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    # 1. 构造输出目录
+    # e.g., Davis/Mamba-BiLSTM/train_result
+    base_output_dir = os.path.join(data_name, model_name, 'train_result')
+    if not os.path.exists(base_output_dir):
+        os.makedirs(base_output_dir)
+        
+    print(f"Training Output Directory: {base_output_dir}")
         
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # --- 1. 数据准备 ---
+    # --- 2. 数据准备 ---
     print("Loading Tokenizers (ChemBERTa & ESM-2)...")
     try:
         smi_tokenizer = AutoTokenizer.from_pretrained('seyonec/ChemBERTa-zinc-base-v1')
@@ -50,11 +57,17 @@ def train_model(data_path, output_dir='checkpoints', batch_size=64, epochs=100, 
     # K-Fold Split
     kfold = KFold(n_splits=folds, shuffle=True, random_state=42)
     
-    # Metrics Storage
-    all_folds_history = []
+    # Metrics Storage (Detailed)
+    # Storing final epoch metrics for each fold
+    all_folds_metrics = []
     
-    print(f"Starting {folds}-Fold Cross Validation for Model: {model_name}...")
+    print(f"Starting {folds}-Fold Cross Validation for Model: {model_name} on {data_name}...")
     
+    # Initialize Log File with Headers
+    log_path = os.path.join(base_output_dir, 'train_log.csv')
+    with open(log_path, 'w') as f:
+        f.write("Fold,Epoch,Train_Loss,Val_Loss,ACC,Sn,Sp,Pre,F1,MCC,AUC\n")
+
     for fold, (train_ids, val_ids) in enumerate(kfold.split(dataset)):
         print(f"\n--- Fold {fold+1}/{folds} ---")
         
@@ -65,36 +78,34 @@ def train_model(data_path, output_dir='checkpoints', batch_size=64, epochs=100, 
         train_loader = DataLoader(dataset, batch_size=batch_size, sampler=train_subsampler, collate_fn=collate_dti)
         val_loader = DataLoader(dataset, batch_size=batch_size, sampler=val_subsampler, collate_fn=collate_dti)
         
-        # --- 2. 模型初始化 ---
-        print(f"Initializing {model_name} (Hidden: {hidden_dim})...")
-        model = get_model(model_name, drug_dim=256, prot_dim=512, hidden_dim=hidden_dim, fine_tune=fine_tune).to(device)
+        # --- 3. 模型初始化 ---
+        print(f"Initializing {model_name}...")
+        try:
+            model = get_model(model_name, drug_dim=256, prot_dim=512, hidden_dim=hidden_dim, fine_tune=fine_tune).to(device)
+        except Exception as e:
+            print(f"Error initializing model {model_name}: {e}")
+            return
         
-        # --- 3. 训练配置 (Stable Configuration) ---
-        # 移除 pos_weight，回归标准 BCEWithLogitsLoss 防止过度摆动
+        # --- 4. 训练配置 ---
         criterion = nn.BCEWithLogitsLoss()
-        
-        # 初始 LR 1e-4，配合 Scheduler 下降
         optimizer = optim.Adam(model.parameters(), lr=lr) 
-        
-        # 调度器: 当 val_acc 停止上升时，LR 减半
         scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
         
-        history = {'train_loss': [], 'val_loss': [], 'val_acc': [], 'best_acc': 0.0}
+        best_acc = 0.0
         
-        # --- 4. 训练循环 ---
+        # --- 5. 训练循环 ---
         for epoch in range(epochs):
             model.train()
             total_loss = 0
             
             loop = tqdm(train_loader, desc=f"Fold {fold+1} Epoch {epoch+1}/{epochs}", leave=False)
             for batch in loop:
-                # Move to Device
                 d_input = (batch['drug_input'][0].to(device), batch['drug_input'][1].to(device), batch['drug_input'][2].to(device))
                 p_input = (batch['prot_input'][0].to(device), batch['prot_input'][1].to(device), batch['prot_input'][2].to(device))
                 labels = batch['labels'].to(device).unsqueeze(1)
                 
                 optimizer.zero_grad()
-                outputs = model(d_input, p_input) # outputs are logits
+                outputs = model(d_input, p_input) # logits
                 
                 loss = criterion(outputs, labels)
                 loss.backward()
@@ -104,56 +115,52 @@ def train_model(data_path, output_dir='checkpoints', batch_size=64, epochs=100, 
                 loop.set_postfix(loss=loss.item())
                 
             avg_loss = total_loss / len(train_loader)
-            history['train_loss'].append(avg_loss)
             
-            # --- 验证 ---
-            val_result = validate(model, val_loader, criterion, device)
-            history['val_loss'].append(val_result['loss'])
-            history['val_acc'].append(val_result['acc'])
+            # --- 验证 (Full Metrics) ---
+            # For logging during training, we compute metrics.
+            # Valid predictions for saving will be done at the end or on best.
+            val_metrics, val_preds, val_targets, val_probs = validate_full(model, val_loader, criterion, device)
             
             # Step Scheduler
-            scheduler.step(val_result['acc'])
+            scheduler.step(val_metrics['ACC'])
             
-            print(f"  Epoch {epoch+1}: Train Loss={avg_loss:.4f}, Val Loss={val_result['loss']:.4f}, Val Acc={val_result['acc']:.2f}%")
+            print(f"  Epoch {epoch+1}: Loss={avg_loss:.4f}, Val Acc={val_metrics['ACC']:.2f}%, AUC={val_metrics['AUC']:.4f}")
             
             # --- 写入 CSV 日志 ---
-            log_path = os.path.join(output_dir, 'training_log.csv')
             with open(log_path, 'a') as f:
-                if f.tell() == 0:
-                    f.write("Fold,Epoch,Train_Loss,Val_Loss,Val_Acc\n")
-                f.write(f"{fold+1},{epoch+1},{avg_loss:.5f},{val_result['loss']:.5f},{val_result['acc']:.4f}\n")
+                f.write(f"{fold+1},{epoch+1},{avg_loss:.5f},{val_metrics['Loss']:.5f},"
+                        f"{val_metrics['ACC']:.4f},{val_metrics['Sn']:.4f},{val_metrics['Sp']:.4f},"
+                        f"{val_metrics['Pre']:.4f},{val_metrics['F1']:.4f},{val_metrics['MCC']:.4f},{val_metrics['AUC']:.4f}\n")
             
             # 记录最佳模型
-            if val_result['acc'] > history['best_acc']:
-                history['best_acc'] = val_result['acc']
-                best_save_path = os.path.join(output_dir, f'model_fold_{fold+1}_best.pth')
+            if val_metrics['ACC'] > best_acc:
+                best_acc = val_metrics['ACC']
+                best_save_path = os.path.join(base_output_dir, f'model_fold_{fold+1}_best.pth')
                 torch.save(model.state_dict(), best_save_path)
-                print(f"  [New Best] Fold {fold+1} Best Model (Acc: {val_result['acc']:.2f}%) saved to {best_save_path}")
-            
-            # Early Stopping Check (Loose)
-            # if no improvement for 15 epochs, maybe stop? For now let it run.
+                print(f"  [New Best] Fold {fold+1} Acc: {best_acc:.2f}% saved.")
+                
+                # Save Validation Predictions for Best Model
+                # Format: label, probability
+                valid_pred_path = os.path.join(base_output_dir, f'{fold+1}_valid_best.csv')
+                with open(valid_pred_path, 'w') as f_pred:
+                    f_pred.write("Label,Probability\n")
+                    for t, p in zip(val_targets, val_probs):
+                        f_pred.write(f"{int(t)},{p:.6f}\n")
 
         # 保存该 Fold 的最终模型
-        save_path = os.path.join(output_dir, f'model_fold_{fold+1}_last.pth')
+        save_path = os.path.join(base_output_dir, f'model_fold_{fold+1}_last.pth')
         torch.save(model.state_dict(), save_path)
-        
-        all_folds_history.append(history)
         
     print("\n" + "="*30)
     print("Cross Validation Complete")
-    
-    # Calculate Average Performance
-    avg_acc = np.mean([h['val_acc'][-1] for h in all_folds_history])
-    print(f"Average Validation Accuracy: {avg_acc:.2f}%")
-    
-    return all_folds_history
+    return None
 
 
-def validate(model, loader, criterion, device):
+def validate_full(model, loader, criterion, device):
     model.eval()
     val_loss = 0
-    correct = 0
-    total = 0
+    all_targets = []
+    all_probs = []
     
     with torch.no_grad():
         for batch in loader:
@@ -165,13 +172,38 @@ def validate(model, loader, criterion, device):
             loss = criterion(outputs, labels)
             val_loss += loss.item()
             
-            # Logits -> Sigmoid -> Threshold
             probs = torch.sigmoid(outputs)
-            predicted = (probs > 0.5).float()
-            correct += (predicted == labels).sum().item()
-            total += labels.size(0)
+            all_targets.extend(labels.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
             
-    return {
-        'loss': val_loss / len(loader),
-        'acc': 100 * correct / total if total > 0 else 0
+    # Compute Metrics
+    all_targets = np.array(all_targets).flatten()
+    all_probs = np.array(all_probs).flatten()
+    all_preds = (all_probs > 0.5).astype(int)
+    
+    acc = accuracy_score(all_targets, all_preds) * 100
+    try:
+        auc = roc_auc_score(all_targets, all_probs)
+    except:
+        auc = 0.5
+        
+    tn, fp, fn, tp = confusion_matrix(all_targets, all_preds).ravel() if len(np.unique(all_targets)) > 1 else (0,0,0,0)
+    
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0 # Recall / Sn
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0 # Sp
+    precision = precision_score(all_targets, all_preds, zero_division=0)
+    f1 = f1_score(all_targets, all_preds, zero_division=0)
+    mcc = matthews_corrcoef(all_targets, all_preds)
+    
+    metrics = {
+        'Loss': val_loss / len(loader),
+        'ACC': acc,
+        'Sn': sensitivity,
+        'Sp': specificity,
+        'Pre': precision,
+        'F1': f1,
+        'MCC': mcc,
+        'AUC': auc
     }
+    
+    return metrics, all_preds, all_targets, all_probs
