@@ -434,10 +434,13 @@ def get_model(model_name, **kwargs):
         return MambaBiLSTMModel(fine_tune=kwargs.get('fine_tune', False), 
                                 hidden_dim=kwargs.get('hidden_dim', 256))
     elif 'deep' in model_name: # DeepDTA, DeepConv-DTI
-        return DeepDTA()
+        return DeepDTA(drug_vocab_size=kwargs.get('drug_vocab_size', 600),
+                       prot_vocab_size=kwargs.get('prot_vocab_size', 26))
     elif 'transformer' in model_name: # TransformerCPI
-        return TransformerCPI()
+        return TransformerCPI(drug_vocab_size=kwargs.get('drug_vocab_size', 600),
+                              prot_vocab_size=kwargs.get('prot_vocab_size', 26))
     elif 'mcanet' in model_name: # MCANet
-        return MCANet()
+        return MCANet(drug_vocab_size=kwargs.get('drug_vocab_size', 600),
+                      prot_vocab_size=kwargs.get('prot_vocab_size', 26))
     else:
         raise ValueError(f"Unknown model name: {model_name}")

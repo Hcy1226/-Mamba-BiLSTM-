@@ -6,7 +6,7 @@ import argparse
 
 from architectures import get_model
 from dataset import DTIDataset, collate_dti
-from train import validate
+from train import validate_full
 
 def test_model(weights_path, data_path, model_name='mamba_bilstm', batch_size=4):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -40,13 +40,17 @@ def test_model(weights_path, data_path, model_name='mamba_bilstm', batch_size=4)
     model.eval()
     
     # Validate
-    criterion = torch.nn.BCELoss()
-    result = validate(model, test_loader, criterion, device)
+    criterion = torch.nn.BCEWithLogitsLoss()
+    metrics, preds, targets, probs = validate_full(model, test_loader, criterion, device)
     
     print("="*30)
     print("Test Results:")
-    print(f"Loss: {result['loss']:.4f}")
-    print(f"Accuracy: {result['acc']:.2f}%")
+    print(f"Loss: {metrics['Loss']:.4f}")
+    print(f"Accuracy: {metrics['ACC']:.2f}%")
+    print(f"AUC: {metrics['AUC']:.4f}")
+    print(f"Sn: {metrics['Sn']:.4f}")
+    print(f"Sp: {metrics['Sp']:.4f}")
+    print(f"MCC: {metrics['MCC']:.4f}")
     print("="*30)
 
 if __name__ == "__main__":

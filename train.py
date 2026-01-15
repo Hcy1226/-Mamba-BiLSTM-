@@ -63,10 +63,11 @@ def train_model(data_path, data_name='Davis', batch_size=64, epochs=100, lr=1e-4
     
     print(f"Starting {folds}-Fold Cross Validation for Model: {model_name} on {data_name}...")
     
-    # Initialize Log File with Headers
+    # Initialize Log File with Headers (Simplified)
+    # Fold, ACC, Sn, Sp, Pre, F1, MCC, AUC
     log_path = os.path.join(base_output_dir, 'train_log.csv')
     with open(log_path, 'w') as f:
-        f.write("Fold,Epoch,Train_Loss,Val_Loss,ACC,Sn,Sp,Pre,F1,MCC,AUC\n")
+        f.write("Fold,ACC,Sn,Sp,Pre,F1,MCC,AUC\n")
 
     for fold, (train_ids, val_ids) in enumerate(kfold.split(dataset)):
         print(f"\n--- Fold {fold+1}/{folds} ---")
@@ -81,7 +82,11 @@ def train_model(data_path, data_name='Davis', batch_size=64, epochs=100, lr=1e-4
         # --- 3. 模型初始化 ---
         print(f"Initializing {model_name}...")
         try:
-            model = get_model(model_name, drug_dim=256, prot_dim=512, hidden_dim=hidden_dim, fine_tune=fine_tune).to(device)
+            # Pass vocab sizes for baseline models that use Embedding layers
+            model = get_model(model_name, 
+                              drug_dim=256, prot_dim=512, hidden_dim=hidden_dim, fine_tune=fine_tune,
+                              drug_vocab_size=len(smi_tokenizer),
+                              prot_vocab_size=len(prot_tokenizer)).to(device)
         except Exception as e:
             print(f"Error initializing model {model_name}: {e}")
             return
@@ -92,6 +97,7 @@ def train_model(data_path, data_name='Davis', batch_size=64, epochs=100, lr=1e-4
         scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
         
         best_acc = 0.0
+        best_metrics = None
         
         # --- 5. 训练循环 ---
         for epoch in range(epochs):
@@ -117,8 +123,6 @@ def train_model(data_path, data_name='Davis', batch_size=64, epochs=100, lr=1e-4
             avg_loss = total_loss / len(train_loader)
             
             # --- 验证 (Full Metrics) ---
-            # For logging during training, we compute metrics.
-            # Valid predictions for saving will be done at the end or on best.
             val_metrics, val_preds, val_targets, val_probs = validate_full(model, val_loader, criterion, device)
             
             # Step Scheduler
@@ -126,33 +130,46 @@ def train_model(data_path, data_name='Davis', batch_size=64, epochs=100, lr=1e-4
             
             print(f"  Epoch {epoch+1}: Loss={avg_loss:.4f}, Val Acc={val_metrics['ACC']:.2f}%, AUC={val_metrics['AUC']:.4f}")
             
-            # --- 写入 CSV 日志 ---
-            with open(log_path, 'a') as f:
-                f.write(f"{fold+1},{epoch+1},{avg_loss:.5f},{val_metrics['Loss']:.5f},"
-                        f"{val_metrics['ACC']:.4f},{val_metrics['Sn']:.4f},{val_metrics['Sp']:.4f},"
-                        f"{val_metrics['Pre']:.4f},{val_metrics['F1']:.4f},{val_metrics['MCC']:.4f},{val_metrics['AUC']:.4f}\n")
-            
-            # 记录最佳模型
+            # 记录最佳模型 (Updates per epoch, but only logs final best at end of fold)
             if val_metrics['ACC'] > best_acc:
                 best_acc = val_metrics['ACC']
-                best_save_path = os.path.join(base_output_dir, f'model_fold_{fold+1}_best.pth')
+                best_metrics = val_metrics
+                
+                # Save Best Model Checkpoint
+                best_save_path = os.path.join(base_output_dir, f'model_fold_{fold+1}.pth') 
                 torch.save(model.state_dict(), best_save_path)
                 print(f"  [New Best] Fold {fold+1} Acc: {best_acc:.2f}% saved.")
                 
                 # Save Validation Predictions for Best Model
-                # Format: label, probability
                 valid_pred_path = os.path.join(base_output_dir, f'{fold+1}_valid_best.csv')
                 with open(valid_pred_path, 'w') as f_pred:
                     f_pred.write("Label,Probability\n")
                     for t, p in zip(val_targets, val_probs):
                         f_pred.write(f"{int(t)},{p:.6f}\n")
 
-        # 保存该 Fold 的最终模型
-        save_path = os.path.join(base_output_dir, f'model_fold_{fold+1}_last.pth')
-        torch.save(model.state_dict(), save_path)
-        
+        # --- End of Fold: Write Best Metrics to Log ---
+        if best_metrics is not None:
+            all_folds_metrics.append(best_metrics)
+            with open(log_path, 'a') as f:
+                f.write(f"{fold+1},{best_metrics['ACC']:.4f},{best_metrics['Sn']:.4f},{best_metrics['Sp']:.4f},"
+                        f"{best_metrics['Pre']:.4f},{best_metrics['F1']:.4f},{best_metrics['MCC']:.4f},{best_metrics['AUC']:.4f}\n")
+
+    # --- End of All Folds: Write Average ---
     print("\n" + "="*30)
     print("Cross Validation Complete")
+    
+    if len(all_folds_metrics) > 0:
+        avg_metrics = {}
+        for key in ['ACC', 'Sn', 'Sp', 'Pre', 'F1', 'MCC', 'AUC']:
+            avg_metrics[key] = np.mean([m[key] for m in all_folds_metrics])
+            
+        with open(log_path, 'a') as f:
+            f.write(f"Average,{avg_metrics['ACC']:.4f},{avg_metrics['Sn']:.4f},{avg_metrics['Sp']:.4f},"
+                    f"{avg_metrics['Pre']:.4f},{avg_metrics['F1']:.4f},{avg_metrics['MCC']:.4f},{avg_metrics['AUC']:.4f}\n")
+        
+        print(f"Average Accuracy: {avg_metrics['ACC']:.2f}%")
+        print(f"Average AUC:      {avg_metrics['AUC']:.4f}")
+
     return None
 
 
